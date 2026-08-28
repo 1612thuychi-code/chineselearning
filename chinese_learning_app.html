@@ -41,8 +41,10 @@
     const { useState, useEffect, useRef, useMemo } = React;
 
     // Direct Gemini API Endpoint Configuration
-    const GEMINI_API_KEY = ""; // Extracted at runtime in live environment
+    const GEMINI_API_KEY = ""; // Extracted at runtime in live environment. Put your key here for Gemini usage.
     const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025";
+
+    const STORAGE_KEY = 'chinese_vocab_v1'; // localStorage key
 
     const UI_TEXT = {
       vi: {
@@ -93,7 +95,10 @@
         yourAnswer: 'Bài làm của bạn',
         gradeScore: 'Điểm số AI',
         feedbackDetail: 'Nhận xét chi tiết',
-        corrections: 'Sửa lỗi & Gợi ý nâng cao'
+        corrections: 'Sửa lỗi & Gợi ý nâng cao',
+        noApiKeyNotice: 'Chưa cấu hình khóa API cho Gemini. AI sẽ bị tắt cho các thao tác tự động (bạn vẫn có thể nhập thủ công hoặc import từ file).',
+        exportBtn: 'Xuất JSON',
+        importBtn: 'Nhập JSON'
       },
       en: {
         title: 'Mandarin Mastery AI',
@@ -143,9 +148,29 @@
         yourAnswer: 'Your Submission',
         gradeScore: 'AI Score',
         feedbackDetail: 'Detailed Feedback',
-        corrections: 'Corrections & Improvements'
+        corrections: 'Corrections & Improvements',
+        noApiKeyNotice: 'No Gemini API key configured. AI features are disabled (you can still edit manually or import a vocabulary file).',
+        exportBtn: 'Export JSON',
+        importBtn: 'Import JSON'
       }
     };
+
+    // Helper: safe JSON parse trying to extract JSON substring when responses include extra text
+    function safeParseJSON(text) {
+      if (!text) return null;
+      try {
+        return JSON.parse(text);
+      } catch (err) {
+        // try to extract first {...} block
+        const start = text.indexOf('{');
+        const end = text.lastIndexOf('}');
+        if (start !== -1 && end !== -1 && end > start) {
+          const sub = text.slice(start, end + 1);
+          try { return JSON.parse(sub); } catch (e) { return null; }
+        }
+        return null;
+      }
+    }
 
     function App() {
       const [lang, setLang] = useState('vi');
@@ -164,6 +189,30 @@
       const [isAiAutofilling, setIsAiAutofilling] = useState(false);
       const [aiGeneratedExample, setAiGeneratedExample] = useState(null);
 
+      const hasGeminiKey = Boolean(GEMINI_API_KEY && GEMINI_API_KEY.length > 8);
+
+      // Load from localStorage on mount
+      useEffect(() => {
+        try {
+          const stored = localStorage.getItem(STORAGE_KEY);
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            if (Array.isArray(parsed)) setVocabList(parsed);
+          }
+        } catch (err) {
+          console.warn('Failed to load vocab from localStorage', err);
+        }
+      }, []);
+
+      // Save to localStorage when vocabList changes
+      useEffect(() => {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(vocabList));
+        } catch (err) {
+          console.warn('Failed to save vocab to localStorage', err);
+        }
+      }, [vocabList]);
+
       // AI Autofill with Gemini
       const handleAiAutofill = async () => {
         if (!newHanzi.trim()) {
@@ -171,15 +220,15 @@
           return;
         }
 
+        if (!hasGeminiKey) {
+          alert(lang === 'vi'
+            ? 'Chưa có khóa Gemini. AI tạm tắt. Bạn có thể nhập thủ công hoặc nhập từ file.'
+            : 'No Gemini key configured. AI is disabled. You can fill fields manually or import a vocabulary file.');
+          return;
+        }
+
         setIsAiAutofilling(true);
-        const systemPrompt = `You are an expert Chinese language tutor. Given a Chinese word "${newHanzi.trim()}" and HSK target level ${selectedHsk}, output a JSON object with keys:
-- pinyin: correct Pinyin with tone marks
-- meaningVi: accurate Vietnamese translation
-- meaningEn: accurate English translation
-- exampleHanzi: 1 example sentence in Chinese for ${selectedHsk}
-- examplePinyin: Pinyin of example sentence
-- exampleTranslationVi: Vietnamese translation of sentence
-- exampleTranslationEn: English translation of sentence`;
+        const systemPrompt = `You are an expert Chinese language tutor. Given a Chinese word "${newHanzi.trim()}" and HSK target level ${selectedHsk}, output a JSON object with keys:\n- pinyin: correct Pinyin with tone marks\n- meaningVi: accurate Vietnamese translation\n- meaningEn: accurate English translation\n- exampleHanzi: 1 example sentence in Chinese for ${selectedHsk}\n- examplePinyin: Pinyin of example sentence\n- exampleTranslationVi: Vietnamese translation of sentence\n- exampleTranslationEn: English translation of sentence`;
 
         const payload = {
           contents: [{ parts: [{ text: `Word: "${newHanzi.trim()}", Level: ${selectedHsk}` }] }],
@@ -206,8 +255,8 @@
 
             const data = await response.json();
             const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (jsonText) {
-              const parsed = JSON.parse(jsonText);
+            const parsed = safeParseJSON(jsonText);
+            if (parsed) {
               if (parsed.pinyin) setNewPinyin(parsed.pinyin);
               if (parsed.meaningVi) setNewMeaningVi(parsed.meaningVi);
               if (parsed.meaningEn) setNewMeaningEn(parsed.meaningEn);
@@ -217,6 +266,9 @@
                 exampleTranslationVi: parsed.exampleTranslationVi,
                 exampleTranslationEn: parsed.exampleTranslationEn
               });
+            } else {
+              console.warn('AI returned invalid JSON:', jsonText);
+              alert(lang === 'vi' ? 'AI trả về dữ liệu không hợp lệ.' : 'AI returned invalid data.');
             }
             break;
           } catch (err) {
@@ -263,13 +315,47 @@
         setVocabList(vocabList.filter(item => item.id !== id));
       };
 
+      // Export / Import
+      const handleExportJSON = () => {
+        const blob = new Blob([JSON.stringify(vocabList, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'vocab_list.json';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      };
+
+      const handleImportJSON = (file) => {
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const parsed = JSON.parse(ev.target.result);
+            if (Array.isArray(parsed)) {
+              // basic validation: ensure objects have hanzi
+              const filtered = parsed.filter(p => p && p.hanzi);
+              setVocabList(filtered.map((p, idx) => ({ ...p, id: p.id || `import-${Date.now()}-${idx}`})));
+              alert(lang === 'vi' ? 'Nhập từ thành công!' : 'Import successful!');
+            } else {
+              alert('Invalid file format');
+            }
+          } catch (err) {
+            alert('Failed to parse JSON file');
+          }
+        };
+        reader.readAsText(file);
+      };
+
       const filteredVocab = vocabList.filter(item => {
         const q = searchQuery.toLowerCase();
         return (
           item.hanzi.toLowerCase().includes(q) ||
-          item.pinyin.toLowerCase().includes(q) ||
-          item.meaningVi.toLowerCase().includes(q) ||
-          item.meaningEn.toLowerCase().includes(q)
+          (item.pinyin || '').toLowerCase().includes(q) ||
+          (item.meaningVi || '').toLowerCase().includes(q) ||
+          (item.meaningEn || '').toLowerCase().includes(q)
         );
       });
 
@@ -384,11 +470,14 @@
                 setSearchQuery={setSearchQuery}
                 lang={lang}
                 t={t}
+                hasGeminiKey={hasGeminiKey}
+                onExportJSON={handleExportJSON}
+                onImportJSON={handleImportJSON}
               />
             )}
 
             {activeTab === 'aiTutor' && (
-              <AiTutorTab vocabList={vocabList} lang={lang} t={t} />
+              <AiTutorTab vocabList={vocabList} lang={lang} t={t} hasGeminiKey={hasGeminiKey} />
             )}
 
             {activeTab === 'practice' && (
@@ -413,9 +502,12 @@
       newHanzi, setNewHanzi, newPinyin, setNewPinyin,
       newMeaningVi, setNewMeaningVi, newMeaningEn, setNewMeaningEn,
       selectedHsk, setSelectedHsk, handleAiAutofill, isAiAutofilling,
-      aiGeneratedExample, searchQuery, setSearchQuery, lang, t
+      aiGeneratedExample, searchQuery, setSearchQuery, lang, t,
+      hasGeminiKey, onExportJSON, onImportJSON
     }) {
       useEffect(() => { lucide.createIcons(); });
+
+      const fileInputRef = useRef(null);
 
       return (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -424,24 +516,47 @@
               <h2 className="text-xl font-bold text-purple-700 flex items-center gap-2">
                 <i data-lucide="plus" className="w-5 h-5 text-purple-600"></i> {t.addWord}
               </h2>
-              <span className="text-xs bg-purple-100 text-purple-800 px-2.5 py-1 rounded-full font-bold">
-                Quizlet Style
-              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={onExportJSON}
+                  className="text-xs bg-white/60 px-2.5 py-1 rounded-lg border border-purple-100 text-purple-700 font-semibold"
+                >
+                  {t.exportBtn}
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="application/json"
+                  onChange={(e) => onImportJSON(e.target.files?.[0])}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                  className="text-xs bg-white/60 px-2.5 py-1 rounded-lg border border-purple-100 text-purple-700 font-semibold"
+                >
+                  {t.importBtn}
+                </button>
+              </div>
             </div>
 
             <form onSubmit={onAddWord} className="space-y-4">
               <div>
                 <div className="flex justify-between items-center mb-1">
                   <label className="text-xs font-semibold text-slate-600 uppercase">{t.hanzi}</label>
-                  <button
-                    type="button"
-                    onClick={handleAiAutofill}
-                    disabled={isAiAutofilling || !newHanzi.trim()}
-                    className="text-xs font-bold text-purple-700 bg-purple-100 hover:bg-purple-200 px-2.5 py-1 rounded-lg flex items-center gap-1 transition-all disabled:opacity-50"
-                  >
-                    <i data-lucide="sparkles" className="w-3.5 h-3.5 text-amber-500"></i>
-                    {isAiAutofilling ? t.generating : t.aiAutofill}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {!hasGeminiKey && (
+                      <span className="text-xs text-amber-700 bg-amber-50 px-2 py-1 rounded">{t.noApiKeyNotice}</span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleAiAutofill}
+                      disabled={isAiAutofilling || !newHanzi.trim() || !hasGeminiKey}
+                      className="text-xs font-bold text-purple-700 bg-purple-100 hover:bg-purple-200 px-2.5 py-1 rounded-lg flex items-center gap-1 transition-all disabled:opacity-50"
+                    >
+                      <i data-lucide="sparkles" className="w-3.5 h-3.5 text-amber-500"></i>
+                      {isAiAutofilling ? t.generating : t.aiAutofill}
+                    </button>
+                  </div>
                 </div>
                 <input
                   type="text"
@@ -598,7 +713,7 @@
     }
 
     // AI TUTOR TAB COMPONENT
-    function AiTutorTab({ vocabList, lang, t }) {
+    function AiTutorTab({ vocabList, lang, t, hasGeminiKey }) {
       const [exercise, setExercise] = useState(null);
       const [userAnswer, setUserAnswer] = useState('');
       const [isGenerating, setIsGenerating] = useState(false);
@@ -613,17 +728,17 @@
           return;
         }
 
+        if (!hasGeminiKey) {
+          alert(lang === 'vi' ? 'Chưa có khóa Gemini. AI tạm tắt.' : 'No Gemini key configured. AI is disabled.');
+          return;
+        }
+
         setIsGenerating(true);
         setEvaluation(null);
         setUserAnswer('');
 
         const wordListStr = vocabList.map(v => `${v.hanzi} (${v.pinyin} - ${v.meaningVi || v.meaningEn})`).join(', ');
-        const systemPrompt = `You are a Chinese language tutor. Construct 1 application exercise using target words: ${wordListStr}.
-Return JSON:
-- title: Short exercise title
-- instruction: Instruction for user
-- targetWordsUsed: array of words tested
-- hint: helpful hint`;
+        const systemPrompt = `You are a Chinese language tutor. Construct 1 application exercise using target words: ${wordListStr}.\nReturn JSON:\n- title: Short exercise title\n- instruction: Instruction for user\n- targetWordsUsed: array of words tested\n- hint: helpful hint`;
 
         try {
           const response = await fetch(
@@ -640,9 +755,15 @@ Return JSON:
           );
           const data = await response.json();
           const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (jsonText) setExercise(JSON.parse(jsonText));
+          const parsed = safeParseJSON(jsonText);
+          if (parsed) setExercise(parsed);
+          else {
+            console.warn('Invalid exercise JSON from AI', jsonText);
+            alert('AI returned invalid exercise data');
+          }
         } catch (err) {
           console.error(err);
+          alert('Failed to generate exercise');
         }
         setIsGenerating(false);
       };
@@ -650,14 +771,13 @@ Return JSON:
       const handleEvaluateAnswer = async () => {
         if (!userAnswer.trim()) return;
 
+        if (!hasGeminiKey) {
+          alert(lang === 'vi' ? 'Chưa có khóa Gemini. AI tạm tắt.' : 'No Gemini key configured. AI is disabled.');
+          return;
+        }
+
         setIsEvaluating(true);
-        const systemPrompt = `You are an expert Chinese Examiner. Analyze user's answer.
-Return JSON:
-- score: number (0-100)
-- overallComment: summary comment
-- correctedSentence: correct version
-- grammarFeedback: explanation
-- suggestion: tip for improvement`;
+        const systemPrompt = `You are an expert Chinese Examiner. Analyze user's answer.\nReturn JSON:\n- score: number (0-100)\n- overallComment: summary comment\n- correctedSentence: correct version\n- grammarFeedback: explanation\n- suggestion: tip for improvement`;
 
         try {
           const response = await fetch(
@@ -674,9 +794,15 @@ Return JSON:
           );
           const data = await response.json();
           const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (jsonText) setEvaluation(JSON.parse(jsonText));
+          const parsed = safeParseJSON(jsonText);
+          if (parsed) setEvaluation(parsed);
+          else {
+            console.warn('Invalid evaluation JSON', jsonText);
+            alert('AI returned invalid evaluation data');
+          }
         } catch (err) {
           console.error(err);
+          alert('Failed to evaluate answer');
         }
         setIsEvaluating(false);
       };
@@ -691,14 +817,19 @@ Return JSON:
               <p className="text-xs text-slate-600 mt-1">{t.aiTutorDesc}</p>
             </div>
 
-            <button
-              onClick={generateAiExercise}
-              disabled={isGenerating || vocabList.length === 0}
-              className="bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs px-5 py-3 rounded-xl transition-all shadow-md flex items-center gap-2 disabled:opacity-50"
-            >
-              <i data-lucide="zap" className="w-4 h-4"></i>
-              {t.generateExerciseBtn}
-            </button>
+            <div className="flex flex-col items-end gap-2">
+              {!hasGeminiKey && (
+                <div className="text-xs text-amber-700 bg-amber-50 px-2 py-1 rounded">{t.noApiKeyNotice}</div>
+              )}
+              <button
+                onClick={generateAiExercise}
+                disabled={isGenerating || vocabList.length === 0 || !hasGeminiKey}
+                className="bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs px-5 py-3 rounded-xl transition-all shadow-md flex items-center gap-2 disabled:opacity-50"
+              >
+                <i data-lucide="zap" className="w-4 h-4"></i>
+                {t.generateExerciseBtn}
+              </button>
+            </div>
           </div>
 
           {exercise && (
@@ -723,7 +854,7 @@ Return JSON:
 
               <button
                 onClick={handleEvaluateAnswer}
-                disabled={isEvaluating || !userAnswer.trim()}
+                disabled={isEvaluating || !userAnswer.trim() || !hasGeminiKey}
                 className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 rounded-xl transition-all shadow-md text-sm disabled:opacity-50"
               >
                 {isEvaluating ? t.generating : t.submitAnswerBtn}
